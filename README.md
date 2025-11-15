@@ -59,11 +59,6 @@ autopip myscript.py
 ```
 **- لاگ‌ها داخل فایل autopip.log ذخیره می‌شن.**
 
-
-# 🔗 لینک‌ها:
-GitHub: https://github.com/FrameworkPython/autopip
-PyPI: https://pypi.org/project/autopip/
-
 # 📜 مجوز
 این پروژه تحت مجوز **MIT** منتشر شده.
 

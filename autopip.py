@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, List
 
 from banner import clear_screen, fancy_banner
 
@@ -29,6 +29,7 @@ MODULE_MAP: Dict[str, str] = {
 }
 
 LOG_PATH = os.path.join(os.getcwd(), "autopip.log")
+REQ_FILENAME = "requirements.txt"
 
 # ------------------------------------------------------------
 # httpx برای probe روی PyPI (اگه نصب باشه)
@@ -100,7 +101,7 @@ def is_installed(module: str) -> bool:
         return False
 
 # ------------------------------------------------------------
-# اسم پکیج رو resolve می‌کنیم (نگاشت محلی + probe با httpx اگه باشه)
+# اسم پکیج رو resolve می‌کنیم
 # ------------------------------------------------------------
 def resolve_package_name(module: str) -> Optional[str]:
     if module in MODULE_MAP:
@@ -128,6 +129,45 @@ def pip_install_quiet(package_spec: str) -> bool:
         return True
     except Exception:
         return False
+
+# ------------------------------------------------------------
+# نصب از requirements.txt
+# ------------------------------------------------------------
+def parse_requirements(path: str) -> List[str]:
+    pkgs: List[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                pkgs.append(line)
+    except Exception:
+        pass
+    return pkgs
+
+def install_requirements(path: str) -> List[str]:
+    failed: List[str] = []
+    pkgs = parse_requirements(path)
+    if not pkgs:
+        return failed
+    script_name = os.path.basename(path)
+    clear_screen()
+    fancy_banner(script_name)
+    print_title(f"Installing from {REQ_FILENAME}")
+    for spec in pkgs:
+        print_installing_start(spec)
+        ok = pip_install_quiet(spec)
+        save_log(f"{'INSTALLED' if ok else 'FAILED'} req -> {spec}")
+        print_install_result(spec, ok)
+        if not ok:
+            failed.append(spec)
+    if not failed:
+        print()
+        print_installing_done()
+        staged_sleep(0.6)
+        clear_screen()
+    return failed
 
 # ------------------------------------------------------------
 # لاگ ساده
@@ -187,6 +227,16 @@ def print_installing_done() -> None:
 # جریان اصلی: اسکن فایل و نصب
 # ------------------------------------------------------------
 def run_for_file(target_path: Optional[str]) -> None:
+    current_dir = os.getcwd()
+    req_path = os.path.join(current_dir, REQ_FILENAME)
+
+    if os.path.isfile(req_path):
+        failed_reqs = install_requirements(req_path)
+        if failed_reqs:
+            save_log(f"FAILED_REQUIREMENTS {failed_reqs}")
+            raise ModuleNotFoundError(f"Failed to install requirements: {failed_reqs[0]}")
+        return
+
     if not target_path:
         return
     imports = get_imports_from_file(target_path)
@@ -210,7 +260,7 @@ def run_for_file(target_path: Optional[str]) -> None:
     print_finding_missing()
     print_missing(missing)
 
-    failed = []
+    failed: List[str] = []
     for mod in sorted(missing):
         pkg = resolve_package_name(mod) or mod
         print_installing_start(pkg)
@@ -226,22 +276,18 @@ def run_for_file(target_path: Optional[str]) -> None:
         for fmod in failed:
             print(f"  {Ansi.RED}- {fmod}{Ansi.RESET}")
         staged_sleep(0.6)
-        clear_screen()
-        raise ModuleNotFoundError(f"No module named '{failed[0]}'")
-
-    print()
-    print_installing_done()
-    staged_sleep(0.9)
-    clear_screen()
 
 # ------------------------------------------------------------
 # هوک ایمپورت
 # ------------------------------------------------------------
-def auto_on_import():
+def auto_on_import() -> None:
     main_mod = sys.modules.get("__main__")
     target_path = getattr(main_mod, "__file__", None)
-    if target_path:
+    try:
         run_for_file(target_path)
+    except ModuleNotFoundError:
+        save_log("ModuleNotFoundError in auto_on_import")
+        raise
 
 auto_on_import()
 

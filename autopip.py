@@ -8,12 +8,12 @@
 import ast
 import importlib.util
 import os
-import re
 import subprocess
 import sys
 import time
+import concurrent.futures
+import urllib.request
 from typing import Dict, Optional, Set, List
-
 from banner import clear_screen, fancy_banner
 
 # ------------------------------------------------------------
@@ -58,74 +58,71 @@ class Ansi:
 # ------------------------------------------------------------
 def read_file(path: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        # خوندن به صورت باینری و دیکود کردن برای سرعت و امنیت بیشتر در مواجهه با انکودینگ‌ها
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", errors="ignore")
     except Exception:
         return ""
 
 def get_imports_from_source(source: str) -> Set[str]:
-    mods: Set[str] = set()
+    if not source: return set()
     try:
         tree = ast.parse(source)
-    except Exception:
-        for line in source.splitlines():
-            m = re.match(r"^\s*import\s+([\w\.]+)", line)
-            if m:
-                mods.add(m.group(1).split(".")[0])
-            m2 = re.match(r"^\s*from\s+([\w\.]+)\s+import", line)
-            if m2:
-                mods.add(m2.group(1).split(".")[0])
-        return mods
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for n in node.names:
-                mods.add(n.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for n in node.names:
+                    mods.add(n.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
                 mods.add(node.module.split(".")[0])
-    return mods
+        return mods
+    except Exception:
+        return set()
 
 def get_imports_from_file(path: str) -> Set[str]:
-    if not path:
+    if not path or not os.path.isfile(path):
         return set()
-    src = read_file(path)
-    return get_imports_from_source(src)
+    return get_imports_from_source(read_file(path))
 
 # ------------------------------------------------------------
-# چک می‌کنیم ماژول نصب شده یا نه
+# چک می‌کنیم ماژول نصب شده یا نه (با استفاده از استاندارد پایتون)
 # ------------------------------------------------------------
 def is_installed(module: str) -> bool:
-    try:
-        return importlib.util.find_spec(module) is not None
-    except Exception:
-        return False
+    return importlib.util.find_spec(module) is not None
 
 # ------------------------------------------------------------
 # اسم پکیج رو resolve می‌کنیم
 # ------------------------------------------------------------
-def resolve_package_name(module: str) -> Optional[str]:
+def resolve_package_name(module: str) -> str:
     if module in MODULE_MAP:
         return MODULE_MAP[module]
-    if httpx is not None:
+    
+    # تلاش برای چک کردن وجود پکیج در PyPI به صورت سریع
+    if httpx:
         try:
-            resp = httpx.get(f"https://pypi.org/pypi/{module}/json", timeout=4.0)
-            if resp.status_code == 200:
-                return module
-        except Exception:
-            pass
+            with httpx.Client(timeout=2.0) as client:
+                resp = client.get(f"https://pypi.org/pypi/{module}/json")
+                if resp.status_code == 200: return module
+        except: pass
+    else:
+        try:
+            with urllib.request.urlopen(f"https://pypi.org/pypi/{module}/json", timeout=2.0) as r:
+                if r.getcode() == 200: return module
+        except: pass
     return module
 
 # ------------------------------------------------------------
-# نصب pip به صورت silent
+# نصب pip به صورت Batch و Silent (بهینه‌ترین حالت سیستم‌عاملی)
 # ------------------------------------------------------------
-def pip_install_quiet(package_spec: str) -> bool:
+def pip_install_quiet(package_specs: List[str]) -> bool:
+    if not package_specs: return True
     try:
-        with open(os.devnull, "wb") as devnull:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", package_spec],
-                stdout=devnull,
-                stderr=devnull,
-            )
+        # نصب همه پکیج‌ها در یک فراخوانی ساب‌پروسس
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", *package_specs],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         return True
     except Exception:
         return False
@@ -134,40 +131,36 @@ def pip_install_quiet(package_spec: str) -> bool:
 # نصب از requirements.txt
 # ------------------------------------------------------------
 def parse_requirements(path: str) -> List[str]:
-    pkgs: List[str] = []
     try:
         with open(path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                pkgs.append(line)
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
     except Exception:
-        pass
-    return pkgs
+        return []
 
 def install_requirements(path: str) -> List[str]:
-    failed: List[str] = []
     pkgs = parse_requirements(path)
-    if not pkgs:
-        return failed
+    if not pkgs: return []
+    
     script_name = os.path.basename(path)
     clear_screen()
     fancy_banner(script_name)
     print_title(f"Installing from {REQ_FILENAME}")
+    
     for spec in pkgs:
         print_installing_start(spec)
-        ok = pip_install_quiet(spec)
+    
+    ok = pip_install_quiet(pkgs)
+    for spec in pkgs:
         save_log(f"{'INSTALLED' if ok else 'FAILED'} req -> {spec}")
         print_install_result(spec, ok)
-        if not ok:
-            failed.append(spec)
-    if not failed:
+    
+    if ok:
         print()
         print_installing_done()
         staged_sleep(0.6)
         clear_screen()
-    return failed
+        return []
+    return pkgs
 
 # ------------------------------------------------------------
 # لاگ ساده
@@ -175,8 +168,7 @@ def install_requirements(path: str) -> List[str]:
 def save_log(line: str) -> None:
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"{ts} {line}\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
     except Exception:
         pass
 
@@ -184,10 +176,7 @@ def save_log(line: str) -> None:
 # چاپ مرحله‌ای با تاخیرای ریز
 # ------------------------------------------------------------
 def staged_sleep(sec: float = 0.5) -> None:
-    try:
-        time.sleep(sec)
-    except Exception:
-        pass
+    time.sleep(sec)
 
 def print_title(text: str) -> None:
     print(f"{Ansi.BOLD}{Ansi.CYAN}{text}{Ansi.RESET}")
@@ -224,12 +213,10 @@ def print_installing_done() -> None:
     staged_sleep(0.35)
 
 # ------------------------------------------------------------
-# جریان اصلی: اسکن فایل و نصب
+# جریان اصلی: اسکن فایل و نصب با هم‌روندی بالا
 # ------------------------------------------------------------
 def run_for_file(target_path: Optional[str]) -> None:
-    current_dir = os.getcwd()
-    req_path = os.path.join(current_dir, REQ_FILENAME)
-
+    req_path = os.path.join(os.getcwd(), REQ_FILENAME)
     if os.path.isfile(req_path):
         failed_reqs = install_requirements(req_path)
         if failed_reqs:
@@ -237,44 +224,40 @@ def run_for_file(target_path: Optional[str]) -> None:
             raise ModuleNotFoundError(f"Failed to install requirements: {failed_reqs[0]}")
         return
 
-    if not target_path:
-        return
-    imports = get_imports_from_file(target_path)
-    if not imports:
-        return
-    imports = {m for m in imports if m and m.lower() != "autopip"}
-    if not imports:
-        return
-    missing = set()
-    for mod in sorted(imports):
-        if not is_installed(mod):
-            missing.add(mod)
-    if not missing:
-        return
+    if not target_path: return
+    imports = {m for m in get_imports_from_file(target_path) if m and m.lower() != "autopip"}
+    if not imports: return
 
-    script_name = os.path.basename(target_path)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        missing = {m for m, installed in zip(imports, executor.map(is_installed, imports)) if not installed}
+    
+    if not missing: return
+
     clear_screen()
-    fancy_banner(script_name)
-
+    fancy_banner(os.path.basename(target_path))
     print_identified(imports)
     print_finding_missing()
     print_missing(missing)
 
-    failed: List[str] = []
-    for mod in sorted(missing):
-        pkg = resolve_package_name(mod) or mod
-        print_installing_start(pkg)
-        ok = pip_install_quiet(pkg)
-        save_log(f"{'INSTALLED' if ok else 'FAILED'} {mod} -> {pkg}")
-        print_install_result(pkg, ok)
-        if not ok:
-            failed.append(mod)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        resolved_pkgs = list(executor.map(resolve_package_name, sorted(missing)))
 
-    if failed:
+    for pkg in resolved_pkgs:
+        print_installing_start(pkg)
+
+    success = pip_install_quiet(resolved_pkgs)
+    
+    for mod, pkg in zip(sorted(missing), resolved_pkgs):
+        save_log(f"{'INSTALLED' if success else 'FAILED'} {mod} -> {pkg}")
+        print_install_result(pkg, success)
+
+    if success:
         print()
-        print(f"{Ansi.RED}{Ansi.BOLD}Some packages failed to install:{Ansi.RESET}")
-        for fmod in failed:
-            print(f"  {Ansi.RED}- {fmod}{Ansi.RESET}")
+        print_installing_done()
+        staged_sleep(0.6)
+        clear_screen() 
+    else:
+        print(f"\n{Ansi.RED}{Ansi.BOLD}Some packages failed to install. Check logs.{Ansi.RESET}")
         staged_sleep(0.6)
 
 # ------------------------------------------------------------
@@ -289,23 +272,17 @@ def auto_on_import() -> None:
         save_log("ModuleNotFoundError in auto_on_import")
         raise
 
-auto_on_import()
-
 # ------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------
 def main_cli() -> None:
     import argparse
-    parser = argparse.ArgumentParser(
-        description="autopip — automatic non-interactive dependency installer"
-    )
-    parser.add_argument(
-        "file",
-        nargs="?",
-        help="target Python file to scan (defaults to the running script)"
-    )
+    parser = argparse.ArgumentParser(description="autopip — automatic non-interactive dependency installer")
+    parser.add_argument("file", nargs="?", help="target Python file to scan")
     args = parser.parse_args()
     run_for_file(args.file)
 
 if __name__ == "__main__":
     main_cli()
+else:
+    auto_on_import()

@@ -32,14 +32,6 @@ LOG_PATH = os.path.join(os.getcwd(), "autopip.log")
 REQ_FILENAME = "requirements.txt"
 
 # ------------------------------------------------------------
-# httpx برای probe روی PyPI (اگه نصب باشه)
-# ------------------------------------------------------------
-try:
-    import httpx  # type: ignore
-except Exception:
-    httpx = None
-
-# ------------------------------------------------------------
 # رنگای ANSI برای خروجی رنگی
 # ------------------------------------------------------------
 class Ansi:
@@ -58,7 +50,6 @@ class Ansi:
 # ------------------------------------------------------------
 def read_file(path: str) -> str:
     try:
-        # خوندن به صورت باینری و دیکود کردن برای سرعت و امنیت بیشتر در مواجهه با انکودینگ‌ها
         with open(path, "rb") as f:
             return f.read().decode("utf-8", errors="ignore")
     except Exception:
@@ -93,22 +84,17 @@ def is_installed(module: str) -> bool:
 # ------------------------------------------------------------
 # اسم پکیج رو resolve می‌کنیم
 # ------------------------------------------------------------
+
 def resolve_package_name(module: str) -> str:
     if module in MODULE_MAP:
         return MODULE_MAP[module]
-    
-    # تلاش برای چک کردن وجود پکیج در PyPI به صورت سریع
-    if httpx:
-        try:
-            with httpx.Client(timeout=2.0) as client:
-                resp = client.get(f"https://pypi.org/pypi/{module}/json")
-                if resp.status_code == 200: return module
-        except: pass
-    else:
-        try:
-            with urllib.request.urlopen(f"https://pypi.org/pypi/{module}/json", timeout=2.0) as r:
-                if r.getcode() == 200: return module
-        except: pass
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{module}/json", timeout=2.0) as r:
+            if r.getcode() == 200:
+                return module
+    except:
+        pass
+
     return module
 
 # ------------------------------------------------------------
@@ -117,7 +103,6 @@ def resolve_package_name(module: str) -> str:
 def pip_install_quiet(package_specs: List[str]) -> bool:
     if not package_specs: return True
     try:
-        # نصب همه پکیج‌ها در یک فراخوانی ساب‌پروسس
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", *package_specs],
             stdout=subprocess.DEVNULL,

@@ -17,7 +17,7 @@
 
 ## ⚡ نصب سریع
 ```bash 
-pip install autopip
+pip install pyautopip
 ```
 
 ## 🎯 استفاده
